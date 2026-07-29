@@ -1,0 +1,9 @@
+{
+  "name": "betterleaks-guard",
+  "version": "1.0.0",
+  "description": "Scans every file Claude reads with betterleaks (sandboxed, no network access) and blocks reads that contain likely secrets",
+  "author": {
+    "name": "Lukas Wölfer"
+  },
+  "hooks": "./hooks/hooks.json"
+}
