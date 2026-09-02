@@ -46,20 +46,50 @@ if [ -f "$HOME/.claude/betterleaks-ignore" ]; then
   ignore_args="$ignore_args --ignore-file $HOME/.claude/betterleaks-ignore"
 fi
 
+stderr_file=$(mktemp)
+trap 'rm -f "$stderr_file"' EXIT
+
 set +e
-report=$("$WRAPPER" $ignore_args "$file_path" 2>/dev/null)
+report=$("$WRAPPER" $ignore_args "$file_path" 2>"$stderr_file")
 status=$?
 set -e
+
+stderr_output=$(cat "$stderr_file")
+
+# betterleaks itself only ever emits `null` (no leaks, exit 0) or a JSON
+# array of finding objects (leaks found, exit 1). Exit 1 can also come from
+# the wrapper/sandbox/toolchain failing before betterleaks ever ran (e.g. a
+# mise shim that can't resolve inside the sandbox) - that collides with
+# betterleaks' own "leaks found" exit code, so exit status alone can't tell
+# the two apart. Only trust "leaks found" when stdout is actually a
+# non-empty JSON array of findings; anything else is an infra failure, not
+# a confirmed secret.
+has_findings() {
+  printf '%s' "$1" | jq -e 'type == "array" and length > 0' >/dev/null 2>&1
+}
+
+fail_reason() {
+  reason="$1"
+  if [ -n "$stderr_output" ]; then
+    excerpt=$(printf '%s' "$stderr_output" | tr '\n' ' ' | cut -c1-500)
+    reason="$reason Error output: $excerpt"
+  fi
+  printf '%s' "$reason"
+}
 
 case "$status" in
   0)
     allow
     ;;
   1)
-    findings=$(printf '%s' "$report" | jq -r '[.[] | "\(.RuleID) (line \(.StartLine))"] | join(", ")')
-    deny "betterleaks found a likely secret in $file_path: $findings. Reading this file has been blocked; add it to .claude/betterleaks-ignore if this is a known-safe fixture."
+    if has_findings "$report"; then
+      findings=$(printf '%s' "$report" | jq -r '[.[] | "\(.RuleID) (line \(.StartLine))"] | join(", ")')
+      deny "betterleaks found a likely secret in $file_path: $findings. Reading this file has been blocked; add it to .claude/betterleaks-ignore if this is a known-safe fixture."
+    else
+      deny "$(fail_reason "betterleaks-guard: the scan of $file_path did not complete (betterleaks-sandboxed.sh exited 1 without reporting findings), so this is NOT a confirmed secret. Failing closed as a precaution - reading is blocked only because the check itself could not run.")"
+    fi
     ;;
   *)
-    deny "betterleaks-sandboxed.sh failed to run (exit $status) while checking $file_path; failing closed. Check that betterleaks and the sandboxing tool (sandbox-exec on macOS, bwrap on Linux) are installed and on PATH."
+    deny "$(fail_reason "betterleaks-guard: betterleaks-sandboxed.sh failed to run (exit $status) while checking $file_path, so this is NOT a confirmed secret. Failing closed as a precaution. Check that betterleaks and the sandboxing tool (sandbox-exec on macOS, bwrap on Linux) are installed and on PATH.")"
     ;;
 esac

@@ -1,7 +1,10 @@
 #!/bin/sh
-# Runs betterleaks confined to a network-free sandbox, restricted to reading
-# only the given path. Uses Seatbelt (sandbox-exec) on macOS and Bubblewrap
-# (bwrap) on Linux.
+# Runs betterleaks with no network access, otherwise unsandboxed. Uses
+# Seatbelt (sandbox-exec) on macOS and Bubblewrap (bwrap) on Linux, both
+# configured to isolate network only - not the filesystem, not anything
+# else. That keeps this wrapper agnostic to however `betterleaks` resolves
+# on PATH (plain binary, Homebrew symlink, a version manager shim, ...):
+# there is nothing here that needs to know or care.
 #
 # Usage: betterleaks-sandboxed.sh [--ignore-file <file>]... <path-to-scan>
 #
@@ -79,27 +82,7 @@ case "$OS" in
       exit 127
     fi
 
-    # Resolve symlinks by hand: macOS's BSD readlink has no -f. We need both
-    # the directory betterleaks was found in on PATH, and the directory its
-    # symlink chain resolves to (e.g. Homebrew's bin/ symlink into its
-    # Cellar keg), since the sandbox profile has to allow reading both.
-    resolved="$BETTERLEAKS_BIN"
-    while [ -L "$resolved" ]; do
-      link=$(readlink "$resolved")
-      case "$link" in
-        /*) resolved="$link" ;;
-        *) resolved="$(dirname "$resolved")/$link" ;;
-      esac
-    done
-    BETTERLEAKS_LINK_DIR=$(cd "$(dirname "$BETTERLEAKS_BIN")" && pwd -P)
-    BETTERLEAKS_REAL_DIR=$(cd "$(dirname "$resolved")" && pwd -P)
-
-    exec sandbox-exec \
-      -D SCAN_PATH="$SCAN_PATH" \
-      -D HOME="$HOME" \
-      -D BETTERLEAKS_LINK_DIR="$BETTERLEAKS_LINK_DIR" \
-      -D BETTERLEAKS_REAL_DIR="$BETTERLEAKS_REAL_DIR" \
-      -f "$PROFILE_DIR/betterleaks.sb" \
+    exec sandbox-exec -f "$PROFILE_DIR/betterleaks.sb" \
       "$BETTERLEAKS_BIN" dir --no-banner --redact -f json -r - "$SCAN_PATH" "$@"
     ;;
 
@@ -109,35 +92,13 @@ case "$OS" in
       exit 127
     fi
 
-    BETTERLEAKS_REAL_BIN=$(readlink -f "$BETTERLEAKS_BIN")
-    BETTERLEAKS_LINK_DIR=$(cd "$(dirname "$BETTERLEAKS_BIN")" && pwd -P)
-    BETTERLEAKS_REAL_DIR=$(cd "$(dirname "$BETTERLEAKS_REAL_BIN")" && pwd -P)
-
-    CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/com.github.wasilibs"
-    mkdir -p "$CACHE_DIR" 2>/dev/null || true
-
-    # Deny-by-default via a fresh mount namespace: nothing but what's
-    # explicitly bound below is visible inside the sandbox. --unshare-net
-    # drops all network access, mirroring the Seatbelt profile's
-    # (deny network*). *-try variants are skipped if the source doesn't
-    # exist, so this works whether or not betterleaks is dynamically linked.
+    # --dev-bind / / gives the sandboxed process the real filesystem,
+    # unrestricted (this only isolates network, see betterleaks.sb's
+    # comment for why). --unshare-net drops all network access.
     exec bwrap \
-      --unshare-net --unshare-pid --unshare-ipc --unshare-uts \
+      --unshare-net \
       --die-with-parent --new-session \
-      --proc /proc --dev /dev --tmpfs /tmp \
-      --setenv TMPDIR /tmp \
-      --ro-bind-try /usr /usr \
-      --ro-bind-try /lib /lib \
-      --ro-bind-try /lib64 /lib64 \
-      --ro-bind-try /bin /bin \
-      --ro-bind-try /sbin /sbin \
-      --ro-bind-try /etc/ld.so.cache /etc/ld.so.cache \
-      --ro-bind-try /etc/ld.so.conf /etc/ld.so.conf \
-      --ro-bind-try /etc/ld.so.conf.d /etc/ld.so.conf.d \
-      --ro-bind "$BETTERLEAKS_LINK_DIR" "$BETTERLEAKS_LINK_DIR" \
-      --ro-bind-try "$BETTERLEAKS_REAL_DIR" "$BETTERLEAKS_REAL_DIR" \
-      --bind "$CACHE_DIR" "$CACHE_DIR" \
-      --ro-bind "$SCAN_PATH" "$SCAN_PATH" \
+      --dev-bind / / \
       -- "$BETTERLEAKS_BIN" dir --no-banner --redact -f json -r - "$SCAN_PATH" "$@"
     ;;
 

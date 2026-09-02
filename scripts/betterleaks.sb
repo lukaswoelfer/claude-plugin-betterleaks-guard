@@ -4,51 +4,14 @@
 ; does can reach the network, no matter what flags/config get passed to it
 ; (including --validation, which normally calls out to live provider APIs).
 ;
-; Everything is denied by default; only the exact things betterleaks/dyld/Go
-; need to start up and scan a file are allowed back in.
+; Everything else is allowed - this only isolates network access, not the
+; filesystem or anything else. betterleaks needs to run whatever toolchain
+; resolves it on PATH (a plain binary, a Homebrew symlink, a version
+; manager shim, ...) without the sandbox caring what that is or where it
+; lives, so file access is unrestricted.
 
-(deny default)
+(allow default)
 
-(allow process-fork)
-(allow process-exec)
-(allow sysctl-read)
-(allow mach-lookup)
-(allow iokit-open)
-
-; dyld needs to stat the root/volume itself during startup; harmless (no
-; content is read, just existence/attributes of paths everywhere).
-(allow file-read* (literal "/"))
-(allow file-read-metadata)
-
-; The betterleaks install itself. BETTERLEAKS_LINK_DIR is the directory it
-; was found in on PATH; BETTERLEAKS_REAL_DIR is that resolved through any
-; symlinks (e.g. Homebrew's bin/ symlink into its Cellar keg). Both need to
-; be readable/mappable, plus the /dev nodes Go's runtime touches.
-(allow file-read*
-  (subpath (param "BETTERLEAKS_LINK_DIR"))
-  (subpath (param "BETTERLEAKS_REAL_DIR"))
-  (literal "/dev/null")
-  (literal "/dev/urandom")
-  (literal "/dev/random")
-  (literal "/dev/dtracehelper")
-  (literal "/dev/stdin")
-  (literal "/dev/stdout")
-  (literal "/dev/stderr")
-  (literal "/dev/tty")
-  (subpath "/dev/fd"))
-(allow file-write-data (literal "/dev/null"))
-
-; betterleaks compiles its RE2 matcher to WASM (via wazero) and caches the
-; compiled module locally on first run. Purely local, no network involved.
-(allow file-read* file-write*
-  (subpath (string-append (param "HOME") "/Library/Caches/com.github.wasilibs")))
-
-; Only the file/dir actually being scanned is readable, passed in via
-; -D SCAN_PATH=...
-(allow file-read* (subpath (param "SCAN_PATH")))
-
-; Belt-and-suspenders: even though (deny default) already blocks the
-; network, spell it out so intent survives future edits to this file.
 (deny network*)
 (deny network-inbound)
 (deny network-outbound)
